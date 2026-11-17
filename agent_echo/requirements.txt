@@ -1,0 +1,2 @@
+# Packaged into the control zip (build/agent_echo.zip) by scripts/package_agent.py echo
+bedrock-agentcore==1.26.0

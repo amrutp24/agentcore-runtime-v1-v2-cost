@@ -1,0 +1,42 @@
+# experiment output and build artifacts
+results/
+build/
+
+# local config (may contain profile names); config.example.yaml is the tracked template
+config.yaml
+
+# draft article stays out of the repo
+article/
+
+# editor / assistant tooling
+
+# terraform (state and workspaces can contain account ids and ARNs)
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfstate.d/
+*.tfvars
+*.tfvars.json
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+# infra/.terraform.lock.hcl is deliberately NOT ignored: commit it
+
+# python
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# credentials and secrets
+.env
+.env.*
+*.pem
+*.key
+.aws/
+credentials
+credentials.*
+*.credentials

@@ -1,0 +1,5 @@
+# Local tooling (load driver, cost collection, report). Python 3.11+.
+boto3==1.44.3
+PyYAML==6.0.3
+matplotlib==3.11.2
+uv==0.13.8

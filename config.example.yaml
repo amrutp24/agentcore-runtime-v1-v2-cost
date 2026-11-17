@@ -1,0 +1,77 @@
+# Copy to config.yaml (gitignored) and edit. No account ids or credentials here:
+# credentials come from the normal AWS chain; set AWS_PROFILE in your shell
+# (or aws_profile below).
+
+region: us-east-1            # V2 is available here; us-east-1 also has Nova Micro in-Region
+aws_profile: ""              # optional; empty = use environment / default chain
+project_tag: agentcore-bill-experiment
+model_id: amazon.nova-micro-v1:0
+results_dir: results
+
+# Cost Explorer window. end is exclusive (CE convention).
+window:
+  start: "2026-11-15"
+  end: "2026-11-21"
+
+# Subnets must be in AZ IDs AgentCore supports for the region.
+# us-east-1 list from the VPC doc; use1-az6 is V2-only so it is left out.
+# TODO(verify): re-check the list if you change region.
+supported_az_ids: [use1-az1, use1-az2, use1-az4]
+az_count: 2
+
+# Interface endpoints for the "vpc_endpoints" network mode. An S3 gateway
+# endpoint is always added in that mode. Zip deploy needs no ECR endpoints;
+# add ecr.api and ecr.dkr here if you switch to container images.
+# TODO(verify): whether the runtime needs more (e.g. sts, monitoring, xray).
+interface_endpoint_services: [logs, bedrock-runtime]
+
+# Add an S3 gateway endpoint to the NAT variant too? Default off so the NAT
+# variant shows the "everything through NAT" cost the VPC doc warns about.
+nat_s3_gateway_endpoint: false
+
+# One runtime per variant (cost attribution by tag + resource id).
+# network: public | vpc_nat | vpc_endpoints
+# load.rate: steady = invocations per minute; bursty = new sessions per minute
+# load.session_length: invocations per session (0 = unlimited)
+# agent: echo = bare echo control agent (agent_echo/); alloc = allocate-and-free control agent
+#        (agent_alloc/); default is the Strands agent
+# payload_extra: optional dict merged into the request payload (alloc agent: alloc_mb, hold_s)
+variants:
+  pub_v1_bursty:
+    {network: public, platform_version: V1, shape: bursty, idle_timeout_seconds: 900,
+     load: {duration: 2h, rate: 0.5, session_length: 3, max_invocations: 400}}
+  pub_v2_bursty:
+    {network: public, platform_version: V2, shape: bursty, idle_timeout_seconds: 900,
+     load: {duration: 2h, rate: 0.5, session_length: 3, max_invocations: 400}}
+  pub_v1_steady:
+    {network: public, platform_version: V1, shape: steady, idle_timeout_seconds: 900,
+     load: {duration: 6h, rate: 0.2, session_length: 0, max_invocations: 400}}
+  pub_v2_steady:
+    {network: public, platform_version: V2, shape: steady, idle_timeout_seconds: 900,
+     load: {duration: 6h, rate: 0.2, session_length: 0, max_invocations: 400}}
+  pub_v1_idle:
+    {network: public, platform_version: V1, shape: idle, idle_timeout_seconds: 21600,
+     load: {duration: 0s, rate: 0, session_length: 1, max_invocations: 5}}
+  pub_v2_idle:
+    {network: public, platform_version: V2, shape: idle, idle_timeout_seconds: 21600,
+     load: {duration: 0s, rate: 0, session_length: 1, max_invocations: 5}}
+  pub_v2_idle_echo:   # control: bare echo agent (no Strands/boto3/model), 1 h idle timeout
+    {network: public, platform_version: V2, shape: idle, idle_timeout_seconds: 3600, agent: echo,
+     load: {duration: 0s, rate: 0, session_length: 1, max_invocations: 5}}
+  pub_v1_idle_echo:
+    {network: public, platform_version: V1, shape: idle, idle_timeout_seconds: 3600, agent: echo,
+     load: {duration: 0s, rate: 0, session_length: 1, max_invocations: 5}}
+  pub_v2_alloc:       # control: allocate 1 GB, hold 5 s, free it, then idle (1 h idle timeout)
+    {network: public, platform_version: V2, shape: idle, idle_timeout_seconds: 3600, agent: alloc,
+     payload_extra: {alloc_mb: 1024, hold_s: 5},
+     load: {duration: 0s, rate: 0, session_length: 1, max_invocations: 5}}
+  pub_v1_alloc:
+    {network: public, platform_version: V1, shape: idle, idle_timeout_seconds: 3600, agent: alloc,
+     payload_extra: {alloc_mb: 1024, hold_s: 5},
+     load: {duration: 0s, rate: 0, session_length: 1, max_invocations: 5}}
+  nat_v1_bursty:
+    {network: vpc_nat, platform_version: V1, shape: bursty, idle_timeout_seconds: 900,
+     load: {duration: 2h, rate: 0.5, session_length: 3, max_invocations: 400}}
+  ep_v1_bursty:
+    {network: vpc_endpoints, platform_version: V1, shape: bursty, idle_timeout_seconds: 900,
+     load: {duration: 2h, rate: 0.5, session_length: 3, max_invocations: 400}}

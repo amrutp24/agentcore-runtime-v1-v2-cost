@@ -1,0 +1,99 @@
+# Rate card + model assumptions. Code never hardcodes a rate or an assumption.
+# Every rate has source and retrieved. verified=false means the number did not
+# come straight off an official page that I could read; check before publishing.
+
+rates:
+  agentcore_runtime_v1_vcpu_hour:
+    value: 0.0895
+    unit: USD per vCPU-hour
+    source: https://aws.amazon.com/bedrock/agentcore/pricing/
+    retrieved: "2026-11-15"
+    verified: true
+  agentcore_runtime_v1_gb_hour:
+    value: 0.00945
+    unit: USD per GB-hour
+    source: https://aws.amazon.com/bedrock/agentcore/pricing/
+    retrieved: "2026-11-15"
+    verified: true
+  agentcore_runtime_v2_vcpu_hour:      # V2 consumption pricing (no resource configuration)
+    value: 0.1276
+    unit: USD per vCPU-hour
+    source: https://aws.amazon.com/bedrock/agentcore/pricing/
+    retrieved: "2026-11-15"
+    verified: true
+  agentcore_runtime_v2_gb_hour:
+    value: 0.0169
+    unit: USD per GB-hour
+    source: https://aws.amazon.com/bedrock/agentcore/pricing/
+    retrieved: "2026-11-15"
+    verified: true
+  nat_gateway_hour:
+    value: 0.045
+    unit: USD per NAT gateway-hour
+    source: https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current/us-east-1/index.json
+    retrieved: "2026-11-16"
+    verified: true    # AWS Price List API, us-east-1, NatGateway-Hours; vpc/pricing page only shows a US East (Ohio) example (also $0.045)
+  nat_gateway_gb:
+    value: 0.045
+    unit: USD per GB processed
+    source: https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current/us-east-1/index.json
+    retrieved: "2026-11-16"
+    verified: true    # AWS Price List API, us-east-1, NatGateway-Bytes
+  public_ipv4_hour:
+    value: 0.005
+    unit: USD per public IPv4 address-hour (in use or idle)
+    source: https://aws.amazon.com/vpc/pricing/
+    retrieved: "2026-11-15"
+    verified: true
+  interface_endpoint_hour_per_az:
+    value: 0.01
+    unit: USD per endpoint ENI (per AZ) hour
+    source: https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonVPC/current/us-east-1/index.json
+    retrieved: "2026-11-16"
+    verified: true    # AWS Price List API, USE1-VpcEndpoint-Hours = $0.01 per VPC endpoint hour (per AZ)
+  interface_endpoint_gb:
+    value: 0.01
+    unit: USD per GB processed, first 1 PB/month
+    source: https://aws.amazon.com/privatelink/pricing/
+    retrieved: "2026-11-15"
+    verified: true
+  model_input_per_1k_tokens:
+    value: 0.000035
+    unit: USD per 1K input tokens (Nova Micro, standard tier)
+    source: https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrockFoundationModels/current/us-east-1/index.json
+    retrieved: "2026-11-16"
+    verified: true    # AWS Price List API, USE1-NovaMicro-input-tokens, us-east-1 on-demand
+  model_output_per_1k_tokens:
+    value: 0.00014
+    unit: USD per 1K output tokens (Nova Micro, standard tier)
+    source: https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrockFoundationModels/current/us-east-1/index.json
+    retrieved: "2026-11-16"
+    verified: true    # AWS Price List API, USE1-NovaMicro-output-tokens, us-east-1 on-demand
+
+# Behaviour taken from the docs (not rates).
+behaviour:
+  v2_idle_memory_reclaim_seconds:
+    value: 120
+    source: https://aws.amazon.com/bedrock/agentcore/pricing/
+    retrieved: "2026-11-15"
+    verified: true    # pricing page says idle memory is reclaimed after 120 s; no developer-guide confirmation
+
+# Usage assumptions for the naive (log-driven) prediction. Guesses until you
+# calibrate them from the CPUUsed-vCPUHours / MemoryUsed-GBHours metrics.
+assumptions:
+  agent_memory_gb: 0.4                     # memory the agent actually holds
+  cpu_vcpu_seconds_per_warm_invocation: 0.3  # CPU time only; LLM wait is not billed
+  cpu_vcpu_seconds_extra_cold_start: 2.0
+  network_kb_per_invocation: 30            # through NAT / endpoints, both directions
+  network_gb_background_per_hour: 0.0      # image/code refresh etc.; measure from NAT metrics
+
+# Map Cost Explorer lines to buckets. First match wins.
+# TODO(verify): the service name and usage-type strings below are from memory
+# or a single third-party post; run collect_costs.py and fix after looking at
+# the real USAGE_TYPE values in your account.
+usage_type_buckets:
+  - {bucket: agentcore, service_regex: "AgentCore", usage_type_regex: ".*"}
+  - {bucket: public_ipv4, service_regex: ".*", usage_type_regex: "PublicIPv4"}
+  - {bucket: nat, service_regex: ".*", usage_type_regex: "NatGateway"}
+  - {bucket: vpc_endpoints, service_regex: ".*", usage_type_regex: "VpcEndpoint"}
+  - {bucket: bedrock_model, service_regex: "^Amazon Bedrock$", usage_type_regex: ".*"}
