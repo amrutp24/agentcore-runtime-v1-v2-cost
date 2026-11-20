@@ -8,6 +8,9 @@
 # NAT gateways, EIPs and endpoints (the billable parts) are removed first by
 # Terraform's dependency order; just re-run this script later for the rest.
 set -uo pipefail
+# Git Bash on Windows rewrites arguments that start with "/" into Windows paths,
+# which corrupts log group names such as /aws/bedrock-agentcore/...
+export MSYS_NO_PATHCONV=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -94,9 +97,27 @@ fi
 
 echo
 echo "== runtimes still present (name starts with bill_)"
-aws bedrock-agentcore-control list-agent-runtimes --region "$REGION" \
-  --query "agentRuntimes[?starts_with(agentRuntimeName, 'bill_')].[agentRuntimeName,agentRuntimeId,status]" \
-  --output table 2>&1 || true
+# boto3 rather than the AWS CLI: older CLI builds do not know this service.
+$PY -c "
+import boto3
+c = boto3.client('bedrock-agentcore-control', region_name='$REGION')
+for r in c.list_agent_runtimes().get('agentRuntimes', []):
+    if r['agentRuntimeName'].startswith('bill_'):
+        print(r['agentRuntimeName'], r['agentRuntimeId'], r['status'])
+" 2>&1 || true
+
+echo
+echo "== runtime application log groups still present"
+for LG in $(aws logs describe-log-groups --region "$REGION" \
+    --log-group-name-prefix "/aws/bedrock-agentcore/runtimes/bill_" \
+    --query 'logGroups[].logGroupName' --output text 2>/dev/null | tr -d '\r'); do
+  if [ "$1" = "all" ]; then
+    echo "   deleting log group $LG"
+    aws logs delete-log-group --region "$REGION" --log-group-name "$LG" || FAILED=1
+  else
+    echo "   $LG"
+  fi
+done
 
 echo
 echo "== resources still carrying project=$PROJECT (tagging API can lag a little)"
