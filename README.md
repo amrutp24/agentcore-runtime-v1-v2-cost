@@ -1,36 +1,26 @@
-# AgentCore Runtime V1 vs V2: a billing and latency measurement rig
+# AgentCore Runtime V1 vs V2: cost and latency measurement
 
-This repository deploys the same small agent to Amazon Bedrock AgentCore Runtime in
-twelve variants, drives each with a controlled load shape, and compares the measured
-bill and latency with what the published rate card predicts. It compares:
+Terraform, Python and bash to deploy the same agent to Amazon Bedrock AgentCore Runtime on
+platform V1 and V2, send it controlled load, and compare what each version meters and bills.
+It also compares public networking with a VPC behind a NAT gateway and a VPC with endpoints only.
 
-- Runtime platform V1 against V2 (same agent, same code).
-- Public networking against a VPC with a NAT gateway against a VPC with interface
-  endpoints only.
-- Three load shapes (bursty short sessions, one steady long session, one call then idle).
-- Two control agents that isolate what the agent process itself does with memory.
+Each variant gets its own Runtime. Cost Explorer is daily and CloudWatch reports usage per
+Runtime, so two configurations sharing a Runtime can't be told apart afterwards. Every resource
+is tagged `project=agentcore-bill-experiment` and `variant=<id>`.
 
-Everything is Terraform plus Python and bash. One Runtime is deployed per variant so
-that Cost Explorer (daily granularity) and CloudWatch (per Runtime id) can attribute
-cost to a single configuration. Every resource is tagged `project=agentcore-bill-experiment`
-and `variant=<id>`.
+The NAT gateway and interface endpoints bill for every hour they exist. See "Cost" before you
+deploy those two variants.
 
-The deployed resources bill by the hour while they exist. Read "Cost and duration" and
-"Safety notes" before running anything.
+## What V2 reclaims
 
-## The premise, corrected
+The AWS docs say V2 "reclaims memory as your agent releases it", and the pricing page says
+"Memory is reclaimed within the session when unused for 120 seconds". Both are about memory the
+agent process has freed. A session that sits idle with its libraries loaded has freed nothing,
+and it is metered until its idle timeout on both versions.
 
-The AWS documentation says V2 "reclaims memory as your agent releases it", and the
-AgentCore pricing page says "Memory is reclaimed within the session when unused for 120
-seconds". Both sentences are about memory the agent process has freed. They are not
-about an idle session. An agent that never frees memory (a long-lived Python process
-holding its heap) should not be expected to show any reclaim, and a session that
-sits idle is still a session until its idle timeout.
-
-An earlier version of this experiment assumed the opposite and looked for memory
-billing to fall during idle time. The repository now has controls that test the documented behaviour
-directly: a bare echo agent (no framework, no model call) and an allocate-and-free agent
-that really gives memory back to the operating system before it responds.
+The two control agents are there to separate those cases. The echo agent does nothing, which
+shows what the platform meters on its own. The alloc agent takes 1 GB and gives it back to the
+operating system, which shows the reclaim.
 
 ## Variants
 
@@ -51,14 +41,12 @@ Defined in `config.example.yaml`. `idle timeout` is `idleRuntimeSessionTimeout`.
 | nat_v1_bursty | VPC + NAT gateway | V1 | bursty | Strands | 15 min |
 | ep_v1_bursty | VPC + interface endpoints (`logs`, `bedrock-runtime`) + S3 gateway endpoint | V1 | bursty | Strands | 15 min |
 
-Agents:
+The agents:
 
-- `agent/main.py`: Strands agent with one tool, low max tokens, Amazon Nova Micro.
-- `agent_echo/main.py`: only `BedrockAgentCoreApp`. No Strands, no boto3 client, no
-  model call, no background threads.
-- `agent_alloc/main.py`: same bare app, but a payload `{"alloc_mb": N, "hold_s": S}` makes
-  it hold N MB of touched memory for S seconds, free it (anonymous `mmap` closed, `gc.collect()`,
-  glibc `malloc_trim(0)`), and report its resident set size before, at peak and after.
+- `agent/main.py` is a Strands agent with one tool, a low max-token limit and Amazon Nova Micro.
+- `agent_echo/main.py` is only `BedrockAgentCoreApp`. It returns its input.
+- `agent_alloc/main.py` is the same bare app. A payload of `{"alloc_mb": N, "hold_s": S}` makes it
+  hold N MB for S seconds, free it, and report its resident set size before, at peak and after.
 
 ## Repository layout
 
@@ -83,75 +71,56 @@ analysis/report.py         predicted vs actual table, latency, charts
 analysis/idle_timeline.py  per-minute GB held and vCPU used for idle variants (CloudWatch)
 ```
 
-Local, untracked output goes to `build/` (zips, generated tfvars) and `results/` (logs, CSVs,
-reports). Terraform state is local, one workspace per variant, under `infra/terraform.tfstate.d/`.
+Output goes to `build/` (zips, generated tfvars) and `results/` (logs, CSVs, reports). Both are
+gitignored. Terraform state is local, one workspace per variant, under `infra/terraform.tfstate.d/`.
 
 ## Prerequisites
 
 - Python 3.11 or newer.
-- Terraform 1.5 or newer (developed with 1.11.2 and AWS provider 6.73.0).
-- AWS CLI v2, recent enough to include the `bedrock-agentcore` and `bedrock-agentcore-control`
-  commands (needed by `teardown.sh`).
-- bash (Git Bash on Windows works).
-- No Docker. Agents ship as direct-deploy zips with linux/arm64 wheels fetched by `uv`.
-- An AWS profile in an account you are happy to run this in, in a Region where Runtime V2 and
-  Amazon Nova Micro are available (default `us-east-1`). Cost Explorer enabled, and Billing
-  console access to activate cost allocation tags.
+- Terraform 1.5 or newer. I used 1.11.2 with AWS provider 6.73.0.
+- AWS CLI v2 and bash. Git Bash on Windows works.
+- `uv`, which fetches the linux/arm64 wheels for the agent zips. Docker isn't needed.
+- An AWS account in a Region that has Runtime V2 and Amazon Nova Micro (default `us-east-1`),
+  with Cost Explorer enabled.
 
-High-level IAM permissions:
+Permissions, roughly:
 
-- Deploy and teardown profile: create and delete VPC networking (subnets, route tables, NAT
-  gateways, Elastic IPs, VPC endpoints, security groups), IAM roles and inline policies, S3
-  buckets and objects, `bedrock-agentcore-control` Runtimes, CloudWatch Logs log groups, delivery
-  sources/destinations/deliveries and resource policies, and tagging read (for the leftover listing).
-- Load profile: `bedrock-agentcore:InvokeAgentRuntime` and `StopRuntimeSession`.
-- Read-only profile for collection and reports: `ce:GetCostAndUsage`, `cloudwatch:GetMetricData`
-  and `ListMetrics`, `logs:FilterLogEvents`. Each Cost Explorer API request costs $0.01.
+- To deploy and tear down: VPC networking, IAM roles, S3, `bedrock-agentcore-control` Runtimes,
+  CloudWatch Logs (log groups, deliveries, resource policies) and tagging read.
+- To send load: `bedrock-agentcore:InvokeAgentRuntime` and `StopRuntimeSession`.
+- To collect and report: `ce:GetCostAndUsage`, `cloudwatch:GetMetricData`, `cloudwatch:ListMetrics`
+  and `logs:FilterLogEvents`.
 
-Select profiles with `AWS_PROFILE`. Nothing is written into the repo; `config.yaml` is
-gitignored in case you set `aws_profile` there.
+Pick the profile with `AWS_PROFILE`. `config.yaml` is gitignored in case you set `aws_profile` there.
 
-## Cost and duration
+## Cost
 
-The original run kept all variants deployed for about 96 hours (four days of load rounds) and was
-budgeted at roughly $10. Estimates at us-east-1 list prices follow. Rates and their sources are in
-`analysis/rates.yaml`; interface endpoint hourly and NAT per-GB rates are marked unverified there.
+My whole run cost $9.39 in us-east-1. About $7 of that was the NAT gateway and the interface
+endpoints, which stayed up for three and a half days. Runtime compute for every variant and
+every run came to $2.20.
 
-| variant | bills while idle | arithmetic | est. USD |
-|---|---|---|---|
-| nat_v1_bursty | NAT gateway, EIP | 0.045 x 96 + 0.005 x 96 + ~0.12 compute | 4.9 |
-| ep_v1_bursty | 2 interface endpoints x 2 AZ | 0.01 x 2 x 2 x 96 + ~0.12 compute | 4.0 |
-| pub_v1_bursty | no (V1 memory runs to idle timeout) | 60 sessions x 915 s x 0.4 GB x 0.00945 + CPU, x2 rounds | 0.12 |
-| pub_v2_bursty | no | 60 sessions x 133 s x 0.4 GB x 0.0169 + CPU, x2 rounds | 0.04 |
-| pub_v1_steady | session memory while the session lives | 6.25 h x 0.4 x 0.00945 = 0.024 per round, 2 rounds | 0.05 |
-| pub_v2_steady | memory only 123 s per call | 72 x 123 s x 0.4 x 0.0169 = 0.017 per round, 2 rounds | 0.04 |
-| pub_v1_idle | yes, until the 6 h idle timeout | 6 h x 0.4 x 0.00945 | 0.02 |
-| pub_v2_idle | see "The premise, corrected" | 123 s x 0.4 x 0.0169 if reclaimed | ~0.00 |
-| echo and alloc controls | session memory until the 1 h idle timeout | pennies each | < 0.10 total |
-| Nova Micro tokens | | ~1,500 calls x (400 in, 60 out) at 0.035 / 0.14 USD per M (unverified) | 0.04 |
-| CloudWatch logs, Cost Explorer API | | logs pennies; $0.01 per CE request, ~15 requests | 0.25 |
-| **Total (the eight Strands-agent variants)** | | | **about 9.5** |
+| item | list rate (USD) | billed in my run |
+|---|---|---|
+| NAT gateway and its public IPv4 address | 0.045 + 0.005 per hour, plus about 0.045 per GB | 1.14 for 20 h, with 3.0 GB of data |
+| Interface endpoints, 2 endpoints x 2 AZs | 0.01 per endpoint per AZ per hour | 0.80 for 20 h |
+| Runtime V1 | 0.0895 per vCPU-hour, 0.00945 per GB-hour | 0.0027 per bursty session |
+| Runtime V2 | 0.1276 per vCPU-hour, 0.0169 per GB-hour | 0.0076 per bursty session |
+| Cost Explorer API | 0.01 per request | a few requests per collection |
 
-Resources that bill while idle, by the hour, whether or not you send traffic:
+A bursty session here is three calls and then 15 minutes waiting for the idle timeout.
 
-- NAT gateway (about $0.045 per hour plus data) and its Elastic IP (about $0.005 per hour).
-- Interface VPC endpoints: about $0.01 per hour per endpoint per Availability Zone (two endpoints x
-  two AZs in the default config). Add `ecr.api` and `ecr.dkr` only if you move to container images
-  (another $3.84 per pair over 96 h).
-- V1 session memory, until the session's idle timeout.
+The VPC, subnets, route tables, security groups, network interfaces and the S3 gateway endpoint
+are free. Runtime sessions meter memory until their idle timeout, so the idle variants with long
+timeouts keep costing a little after the single call.
 
-Free: the VPC, subnets, route tables, security groups, ENIs and the S3 gateway endpoint. Runtime
-log groups have no expiry unless removed, so teardown deletes them.
+If you only want the V1 and V2 comparison, skip `nat_v1_bursty` and `ep_v1_bursty`. The public
+variants cost cents, and the four control variants (`*_idle_echo`, `*_alloc`) can be deployed,
+measured and torn down in about two hours.
 
-The AgentCore compute amounts are small. The two variants that cost real money are the NAT and
-endpoint ones, and only because they are billed for every hour they exist. If you only want the
-V1/V2 memory controls, deploy just the four `*_idle_echo` / `*_alloc` variants and tear down the same
-day (about two hours).
-
-Cost Explorer lags about 24 hours, so the last day of cost data arrives after teardown (pulling it is
-read-only). Cost allocation tags only appear in Cost Explorer after they are activated in Billing,
-and only for usage after activation. `report.py` labels variants with no usable tag data `share`
-(account total split by usage share) instead of `tag`. Model-token spend is always allocated by token share.
+Cost Explorer lags about 24 hours, so the last day of cost data arrives after teardown. Cost
+allocation tags show up only after you activate them in Billing, and only for usage after that.
+`report.py` marks a variant `share` when it had to split the account total by usage share, and
+`tag` when it had tag data.
 
 ## Step by step
 
@@ -167,20 +136,20 @@ export AWS_PROFILE=<deploy-profile>
 aws sts get-caller-identity          # confirm you are in the intended account
 ```
 
-Edit `config.yaml`: set `window.start` / `window.end` to cover your run (end is exclusive), and
-remove variants you do not want. `supported_az_ids` must be AZ ids AgentCore supports in the Region;
-re-check it if you change Region. The example config contains no account ids or credentials.
+In `config.yaml`, set `window.start` and `window.end` to cover your run (end is exclusive) and
+remove the variants you don't want. `supported_az_ids` must list AZ ids that AgentCore supports
+in the Region, so check it if you change Region.
 
 ### 2. Plan (creates nothing)
 
-`deploy.sh` runs `terraform apply -auto-approve`. Always plan first:
+`deploy.sh` runs `terraform apply -auto-approve`, so plan first:
 
 ```bash
 PLAN_ONLY=1 bash scripts/deploy.sh pub_v1_bursty
 ```
 
-The first plan or deploy builds `build/agent.zip` (and `build/agent_echo.zip` / `build/agent_alloc.zip`
-when a selected variant needs them).
+The first plan or deploy builds `build/agent.zip`, plus `build/agent_echo.zip` and
+`build/agent_alloc.zip` when a selected variant needs them.
 
 ### 3. Deploy
 
@@ -192,7 +161,7 @@ python load/run_load.py --variant pub_v1_bursty --duration 5m --max-invocations 
 bash scripts/deploy.sh pub_v2_bursty pub_v1_steady pub_v2_steady pub_v1_idle pub_v2_idle nat_v1_bursty ep_v1_bursty
 ```
 
-Outputs per variant are saved to `results/<variant>/outputs.json`.
+Outputs for each variant are saved to `results/<variant>/outputs.json`.
 
 ### 4. Run load
 
@@ -205,18 +174,20 @@ for v in pub_v1_bursty pub_v2_bursty nat_v1_bursty ep_v1_bursty pub_v1_steady pu
 done
 ```
 
-Every invocation is one row in `results/<variant>/invocations.jsonl` (no hidden SDK retries). Shape,
-rate, duration and the hard invocation cap come from the variant's `load` block in the config.
-A run can be interrupted with Ctrl-C and resumed by re-running the same command; the cap counts rows
-already logged and a steady session is reused if still alive. Add `--stop-sessions` to bursty runs to
-end each session early (default off: the idle tail is part of what is measured).
+Each invocation is one row in `results/<variant>/invocations.jsonl`. SDK retries are off, so a
+row is a single attempt. Shape, rate, duration and the invocation cap come from the variant's
+`load` block in the config.
 
-Optional per-variant `payload_extra` in the config is merged into the request payload; variants
-without it send exactly the original payload.
+A run can be stopped with Ctrl-C and resumed by running the same command again. The cap counts
+rows already logged, and a steady session is reused if it is still alive. `--stop-sessions` ends
+each bursty session early. It is off by default because the idle tail is part of the measurement.
 
-### 5. Activate cost allocation tags (changes billing configuration; run it yourself)
+A variant's `payload_extra` is merged into the request payload.
 
-Once the resources exist (tags can take up to 24 hours to appear in Billing):
+### 5. Activate cost allocation tags
+
+This changes billing configuration for the account. Tags can take up to 24 hours to appear in
+Billing after the resources exist.
 
 ```bash
 aws ce update-cost-allocation-tags-status --cost-allocation-tags-status \
@@ -225,7 +196,7 @@ aws ce update-cost-allocation-tags-status --cost-allocation-tags-status \
 
 ### 6. Collect
 
-Read-only. Use a read-only profile if you have one.
+These only read. Use a read-only profile if you have one.
 
 ```bash
 export AWS_PROFILE=<read-only-profile>
@@ -233,8 +204,8 @@ python analysis/collect_costs.py [--start YYYY-MM-DD] [--end YYYY-MM-DD]
 python analysis/collect_usage_logs.py     # per-session usage logs -> results/usage/ (see Known issues)
 ```
 
-After the first `collect_costs.py` run, print the real Cost Explorer `USAGE_TYPE` strings (the command
-is printed by the script) and fix `usage_type_buckets` in `analysis/rates.yaml` if they differ.
+After the first `collect_costs.py` run, print the Cost Explorer `USAGE_TYPE` strings (the script
+prints the command) and fix `usage_type_buckets` in `analysis/rates.yaml` if they differ.
 
 ### 7. Report
 
@@ -243,14 +214,15 @@ python analysis/predict.py --metrics results/costs/cw_metrics.csv
 python analysis/report.py                 # results/report.md, report.csv, *.png
 ```
 
-### 8. Idle timeline (controls)
+### 8. Idle timeline
 
 ```bash
 python analysis/idle_timeline.py --variants pub_v2_idle_echo pub_v1_idle_echo --minutes 90
 ```
 
-`results/idle_timeline.csv` has GB held and vCPU used per minute (CloudWatch `MemoryUsed-GBHours`
-and `CPUUsed-vCPUHours` times 60) since the variant's first call. Timestamps are UTC. CloudWatch lags a few minutes.
+`results/idle_timeline.csv` has GB held and vCPU used per minute since the variant's first call.
+The values are CloudWatch `MemoryUsed-GBHours` and `CPUUsed-vCPUHours` multiplied by 60.
+Timestamps are UTC, and CloudWatch lags a few minutes.
 
 ### 9. Teardown
 
@@ -259,26 +231,23 @@ export AWS_PROFILE=<deploy-profile>
 bash scripts/teardown.sh all             # or: bash scripts/teardown.sh nat_v1_bursty ep_v1_bursty
 ```
 
-It runs `terraform destroy` per variant (NAT gateways, EIPs, endpoints, Runtimes, IAM roles, code
-buckets, usage-log delivery), deletes the Runtime log groups, deletes any ECR repos tagged
-`project=agentcore-bill-experiment`, deletes the account-level log resource policy when run with `all`,
-then lists remaining Runtimes and anything still carrying the project tag. It is idempotent.
+This runs `terraform destroy` for each variant, deletes the Runtime log groups and any ECR repos
+tagged `project=agentcore-bill-experiment`, and with `all` also deletes the account-level log
+resource policy. It finishes by listing any Runtimes and tagged resources that are left.
 
-Run it a second time later. AgentCore leaves its VPC network interfaces in place for up to about 8
-hours after a Runtime is deleted, so subnet, security group and
-VPC deletion can fail on the first pass with a dependency error. The billable parts (NAT, EIP, endpoints)
-are removed first. Re-run the script the next day and check that the final listings are empty. Nothing left in a VPC bills,
-but do not skip the second pass.
+Run it again the next day. AgentCore keeps its VPC network interfaces for up to about 8 hours
+after a Runtime is deleted, so the subnets, security groups and VPC can fail to delete on the
+first pass. The NAT gateway, Elastic IP and endpoints go on the first pass, and nothing that is
+left bills. The second pass is done when the final listings are empty.
 
-If you created the usage-log policy by hand with `bash scripts/usage_log_policy.sh`, remove it with
-`bash scripts/usage_log_policy.sh delete` (`teardown.sh all` does this).
+If you created the usage-log policy by hand with `bash scripts/usage_log_policy.sh`, remove it
+with `bash scripts/usage_log_policy.sh delete`.
 
 ## Control: bare echo agent
 
-`pub_v2_idle_echo` and `pub_v1_idle_echo` run `agent_echo/main.py`: only `BedrockAgentCoreApp`, no
-Strands, no boto3 client, no model call, no background threads, 1 h idle timeout. They tell apart
-"V2 does not reclaim idle memory" from "the Strands/boto stack keeps the session busy". Set per variant
-with `agent: echo` in the config.
+`pub_v2_idle_echo` and `pub_v1_idle_echo` run `agent_echo/main.py` with a 1 h idle timeout. With
+no framework, boto3 client or model call, whatever is metered is the platform's own baseline.
+Set it for a variant with `agent: echo`.
 
 ```bash
 bash scripts/deploy.sh pub_v2_idle_echo pub_v1_idle_echo
@@ -290,18 +259,13 @@ python analysis/idle_timeline.py --variants pub_v2_idle_echo pub_v1_idle_echo --
 
 ## Control: allocate and free
 
-The echo agent never uses much memory, so it cannot show whether V2 returns memory that an
-agent releases. `agent_alloc/main.py` tests the documented behaviour directly. With
-`payload_extra: {alloc_mb: 1024, hold_s: 5}` (set in the config for `pub_v2_alloc` and `pub_v1_alloc`),
-the single call allocates 1 GB as an anonymous `mmap` and writes to every page so it is resident, holds
-it for 5 seconds while the request is in flight, then closes the mapping (so the pages are unmapped),
-runs `gc.collect()` and glibc `malloc_trim(0)`, and responds. The response and the JSONL row include
-`alloc_mb`, `rss_mb_before`, `rss_mb_peak` and `rss_mb_after` (VmRSS from `/proc/self/status`) so you
-can confirm the process really freed it. After that the session idles.
+`pub_v2_alloc` and `pub_v1_alloc` send `payload_extra: {alloc_mb: 1024, hold_s: 5}`. The call
+allocates 1 GB as an anonymous `mmap`, writes to every page so it is resident, holds it for 5
+seconds, then closes the mapping, runs `gc.collect()` and glibc `malloc_trim(0)`, and responds.
+A `bytearray` isn't used because freed memory can stay inside the Python allocator.
 
-Expected reading: on V2, if reclaim works as documented, metered memory (`gb_held`) should fall back
-within a few minutes of the free, well before the idle timeout. On V1, compare: V1 meters the whole
-session. A result that differs from this is a finding in itself.
+The response and the JSONL row include `alloc_mb`, `rss_mb_before`, `rss_mb_peak` and
+`rss_mb_after`, read from `/proc/self/status`, so you can check that the process freed it.
 
 ```bash
 bash scripts/deploy.sh pub_v2_alloc pub_v1_alloc
@@ -311,55 +275,53 @@ python load/run_load.py --variant pub_v1_alloc
 python analysis/idle_timeline.py --variants pub_v2_alloc pub_v1_alloc --minutes 30
 ```
 
-The allocation helper can be tried locally without `bedrock_agentcore` installed:
-`python agent_alloc/main.py --selftest 64` prints the RSS before, at peak and after. On Linux this
-reads `/proc`; on Windows it falls back to the process working set; elsewhere the RSS fields are `null`.
-The runtime's memory limit is not documented here; 1 GB is a request to the platform, and if the
-call fails the status is logged in the JSONL row.
+To try the allocation locally without `bedrock_agentcore` installed, run
+`python agent_alloc/main.py --selftest 64`. It reads `/proc` on Linux and the process working
+set on Windows. On other systems the RSS fields are `null`.
 
-## Known issues found during the experiment
+## Known issues
 
-- USAGE_LOGS delivery is configured (`infra/usage_logs.tf`: log group, delivery source on the Runtime
-  ARN, destination, delivery; toggle with `enable_usage_logs`), but no records were delivered. `collect_usage_logs.py` is kept for completeness; do not depend on it.
-  Cost and usage figures come from CloudWatch metrics and Cost Explorer instead.
-- Cost Explorer lags about a day, and the `project` / `variant` cost allocation tags must be activated
-  in Billing and only apply to usage after activation. Expect the first day or so to be untagged.
-- The S3 object for each agent zip is over 16 MB, so S3 stores it with a multipart ETag
-  (`<hash>-N`) that never equals the file's MD5, which would show as a perpetual in-place change in
-  every plan. `infra/runtime.tf` ignores `etag`; the object key embeds the MD5, so a changed zip still
-  produces a new object. Rebuilding a zip therefore changes the plan for every variant using it.
-- A laptop going to sleep interrupts load runs. Runs are resumable: re-run the same command.
-- `OverheadLatency` is emitted for V2 Runtimes only; V1 variants have no such metric.
-- VPC network interfaces can linger for hours after Runtime deletion; see Teardown.
+- USAGE_LOGS delivery is set up in `infra/usage_logs.tf` (toggle with `enable_usage_logs`), but
+  no records were ever delivered to me. `collect_usage_logs.py` is still here, but the cost and
+  usage figures come from CloudWatch metrics and Cost Explorer.
+- Each agent zip is over 16 MB, so S3 stores it with a multipart ETag that never matches the
+  file's MD5. `infra/runtime.tf` ignores `etag` and puts the MD5 in the object key. Rebuilding a
+  zip changes the plan for every variant that uses it.
+- A laptop going to sleep interrupts load runs. Run the same command again to resume.
+- `OverheadLatency` is emitted for V2 Runtimes only.
 
 ## Design notes
 
-- Terraform rather than the AgentCore CLI: the CLI deploys through a CDK app and the documentation
-  consulted exposed no platform-version switch for it. The AWS provider's
-  `aws_bedrockagentcore_agent_runtime` supports `platform_version`, `tags`, VPC config and
-  code-from-S3.
-- Direct code deploy (zip) instead of containers: no Docker, no ECR. Container agents need ECR api/dkr
-  and S3 gateway endpoints; zip agents need the S3 gateway endpoint and Logs, plus Bedrock Runtime
-  for the model call.
-- Idle shape: sessions end after `idleRuntimeSessionTimeout` (default 15 min), so "idle for hours" would
-  bill nothing after 15 min. The idle variants set longer timeouts (the API allows up to 1,209,600 s).
-- One Runtime per variant, because Cost Explorer is daily and cannot separate shapes that share a Runtime.
+- Terraform, not the AgentCore CLI. The CLI deploys through a CDK app and I found no way to set
+  the platform version with it. The AWS provider's `aws_bedrockagentcore_agent_runtime` takes
+  `platform_version`, tags, VPC config and code from S3.
+- Zip deploy, not containers, so there is no Docker or ECR. A zip agent in a VPC needs the S3
+  gateway endpoint, Logs and Bedrock Runtime. A container agent would also need `ecr.api` and
+  `ecr.dkr`.
+- Sessions end after `idleRuntimeSessionTimeout`, which defaults to 15 minutes. The idle variants
+  set longer timeouts so there is something to measure. The API allows up to 1,209,600 s.
 
-## Safety notes
+## Before you run it
 
-- Everything is tagged `project=agentcore-bill-experiment`, plus `variant=<id>`. The teardown script's
-  leftover listing and the cost tags both use that tag.
-- `deploy.sh` uses `terraform apply -auto-approve`. Run it with `PLAN_ONLY=1` first and read the plan.
-- `teardown.sh` destroys with `-auto-approve` and deletes log groups and tagged ECR repos. Check which
-  account `aws sts get-caller-identity` reports before running either script.
-- Nothing in this repository contains credentials or account ids. Terraform state under `infra/`
-  does contain them; it is gitignored and should stay that way, as should `config.yaml`, `results/`, `build/`.
-- Deploying creates billable resources. NAT gateways and interface endpoints bill every hour until torn down.
+- `deploy.sh` and `teardown.sh` both use `-auto-approve`. Check which account
+  `aws sts get-caller-identity` reports first.
+- `teardown.sh` deletes log groups and ECR repos that carry the project tag.
+- Terraform state under `infra/` contains account ids. It is gitignored, along with
+  `config.yaml`, `results/` and `build/`.
 
 ## Results
 
-Not published yet. The write-up will be linked here when it exists. This repository contains the
-method only; no measured results are stated in this README.
+From my run in us-east-1, November 2026:
+
+- Strands agent, bursty sessions: V2 cost 2.8 times as much per session as V1 ($0.0076 against
+  $0.0027). V2 metered about 1.5 times the GB-hours at 1.8 times the rate.
+- Allocate-and-free agent, one-hour session: V2 metered 45 to 56% of V1's GB-hours, and the two
+  cost about the same.
+- CloudWatch usage metrics matched Cost Explorer to within 0.01%.
+- Cold start p50 was 4.69 s on V1 and 2.57 s on V2, measured from a laptop.
+- For 20 hours in a VPC, the NAT gateway variant was billed $1.14 and the endpoints variant $0.80.
+
+These are three small Python agents with short runs, so expect different numbers for your own agent.
 
 ## License
 
