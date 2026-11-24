@@ -311,6 +311,9 @@ set on Windows. On other systems the RSS fields are `null`.
 
 ## Results
 
+The full write-up is on AWS Builder Center:
+https://builder.aws.com/content/3MX8Gq6quxsZnBDx9ez1iylhgEc/i-measured-agentcore-runtime-v1-against-v2-on-the-bill-28x-the-cost-for-one-agent-break-even-for-another
+
 From my run in us-east-1, November 2026:
 
 - Strands agent, bursty sessions: V2 cost 2.8 times as much per session as V1 ($0.0076 against
